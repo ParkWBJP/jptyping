@@ -92,8 +92,8 @@ body {
   border-radius: 20px;
   padding: 16px 24px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-  position: sticky;
-  top: 16px;
+  position: relative;
+  /* Unstuck the header */
   z-index: 50;
 }
 
@@ -235,16 +235,7 @@ body {
   will-change: transform;
 }
 
-border: 1px solid var(--glass-border);
-box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-display: flex;
-flex-direction: column;
-gap: 4px;
-transition: transform 0.1s linear,
-border 0.2s ease,
-box-shadow 0.2s ease;
-will-change: transform;
-}
+
 
 .word-card.active {
   border: 1px solid var(--accent);
@@ -691,5 +682,25 @@ will-change: transform;
 
   .stat-value {
     font-size: 20px;
+  }
+
+  /* Improve mobile readability */
+  .word-card {
+    max-width: 85vw !important;
+    /* Wider cards */
+    padding: 20px !important;
+  }
+
+  .word-display {
+    font-size: 32px !important;
+    /* Larger text */
+  }
+
+  .word-reading {
+    font-size: 16px !important;
+  }
+
+  .word-ko {
+    font-size: 15px !important;
   }
 }
