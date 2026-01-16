@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { GameSettings, MatchState, SentenceEntry, SentenceSegment } from '../types';
 import { applyKeystroke, createMatchState, expectedNextChars, completionRatio } from '../utils/romanizer';
 import StatCard from './StatCard';
@@ -40,6 +40,8 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
   const [playing, setPlaying] = useState(false);
   const [showJP, setShowJP] = useState(true);
   const [showKO, setShowKO] = useState(true);
+  const [mobileInput, setMobileInput] = useState('');
+  const mobileInputRef = useRef<HTMLInputElement>(null);
 
   const { playOk, playError, playCombo, playLevel } = useAudio({
     enabled: settings.soundEnabled,
@@ -74,40 +76,84 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
     playLevel();
   };
 
+  const processKeyPress = useCallback((key: string) => {
+    if (!active || finished || !playing) return;
+    const normalized = key.toLowerCase();
+    if (!/^[a-z']$/.test(normalized) && normalized !== 'backspace') return;
+
+    // Use a ref or functional update carefully. 
+    // Since we need access to 'segments' and 'segmentIndex', we should include them in deps 
+    // OR use a different strategy. 
+    // Simplest is to NOT use functional update for 'match' if we rely on other state, 
+    // but here we are inside a callback that depends on 'match' implicitly via closure if not careful.
+    // Actually, let's just use the current 'match' from scope since we are in a useCallback with proper deps.
+
+    const result = applyKeystroke(match, normalized, settings);
+
+    if (result.status === 'error') {
+      setMistakes((m) => m + 1);
+      playError();
+      return;
+    }
+
+    if (result.advanced) setCorrect((c) => c + 1);
+
+    if (result.status === 'completed') {
+      playCombo();
+      const nextSegment = segmentIndex + 1;
+      if (nextSegment < segments.length) {
+        setSegmentIndex(nextSegment);
+        setMatch(createMatchState(segments[nextSegment].reading));
+      } else {
+        // Last segment completed with this keystroke
+        setFinished(true);
+        setPlaying(false);
+        setMatch(result.state); // Just to show full text
+      }
+    } else {
+      playOk();
+      setMatch(result.state);
+    }
+  }, [active, finished, playing, settings, match, segmentIndex, segments, playOk, playError, playCombo]);
+
+  // Removed broken useEffect for match.isComplete
+
+
   useEffect(() => {
     if (!active || !playing) return;
+
     const handleKey = (e: KeyboardEvent) => {
       if (!active || finished) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+
       const key = e.key.toLowerCase();
       if (!/^[a-z']$/.test(key) && key !== 'backspace') return;
-      e.preventDefault();
-      const result = applyKeystroke(match, key, settings);
-      if (result.status === 'error') {
-        setMistakes((m) => m + 1);
-        playError();
+
+      if (document.activeElement === mobileInputRef.current && key !== 'backspace') {
         return;
       }
-      if (result.advanced) setCorrect((c) => c + 1);
-      setMatch(result.state);
-      if (result.status === 'completed') {
-        const nextSegment = segmentIndex + 1;
-        if (nextSegment < segments.length) {
-          setSegmentIndex(nextSegment);
-          setMatch(createMatchState(segments[nextSegment].reading));
-          playCombo();
-        } else {
-          setFinished(true);
-          setPlaying(false);
-          playCombo();
-        }
-      } else {
-        playOk();
-      }
+
+      e.preventDefault();
+      // Pass the key to a handler that uses the latest state
+      // We can't easily use the callback above because of closure staleness if we don't include all deps
+      // But we did include dependencies.
+      processKeyPress(key);
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [match, active, finished, segmentIndex, segments, settings, playing, playOk, playError, playCombo]);
+  }, [active, playing, finished, processKeyPress]);
+
+  // Mobile Input Handler
+  const handleMobileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    if (val.length < mobileInput.length) {
+      processKeyPress('backspace');
+    } else if (val.length > mobileInput.length) {
+      processKeyPress(val.slice(-1));
+    }
+    if (val.length > 20) setMobileInput(val.slice(-10));
+    else setMobileInput(val);
+  };
 
   if (pool.length === 0) {
     return <div className="card">문장 데이터가 없습니다. JSON import 후 다시 시도하세요.</div>;
@@ -118,6 +164,12 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
   const wpm = Math.round((correct / 5 / elapsedSec) * 60);
   const expected = expectedNextChars(match, settings);
   const progress = Math.round(((segmentIndex + completionRatio(match)) / segments.length) * 100);
+
+  useEffect(() => {
+    if (active && mobileInputRef.current && playing) {
+      mobileInputRef.current.focus();
+    }
+  }, [active, playing]);
 
   return (
     <div className="card">
@@ -158,7 +210,7 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
         <StatCard label="입력" value={`${correct} hit / ${mistakes} miss`} />
       </div>
 
-      <div className="sentence-container" style={{ marginTop: 14 }}>
+      <div className="sentence-container" style={{ marginTop: 24 }}>
         <div className="sentence-card">
           {showJP && (
             <div className="sentence-text">
@@ -179,9 +231,9 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
             </div>
           )}
         </div>
-        <div className="sentence-card">
+        <div className="sentence-card" onClick={() => mobileInputRef.current?.focus()}>
           <div className="hint">로마자 입력 / 읽기 기준</div>
-          <div className="sentence-text segment-highlight" style={{ marginTop: 6 }}>
+          <div className="sentence-text match-highlight" style={{ marginTop: 6, fontSize: 24 }}>
             {segments[segmentIndex]?.reading || ''}
           </div>
           {showKO && (
@@ -189,7 +241,7 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
               {currentEntry.ko}
             </div>
           )}
-          <div className="progress" style={{ marginTop: 10 }}>
+          <div className="progress" style={{ marginTop: 16 }}>
             <span style={{ width: `${progress}%` }} />
           </div>
           {settings.romajiHint && (
@@ -197,12 +249,23 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
               다음 키: {expected.join(' / ') || '...'}
             </div>
           )}
-          <div className="input-area" style={{ marginTop: 10 }}>
+          <div className="input-area" style={{ marginTop: 16 }}>
             <span className="input-chip">입력</span>
             <div className="input-ghost" role="presentation">
               {(match.buffer || '').toUpperCase() || ' '}
               <span className="caret" />
             </div>
+            <input
+              ref={mobileInputRef}
+              type="text"
+              className="mobile-input"
+              value={mobileInput}
+              onChange={handleMobileInput}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder="모바일에서 여기를 탭하고 입력"
+            />
           </div>
         </div>
       </div>
@@ -216,7 +279,7 @@ const SentenceGame: React.FC<Props> = ({ settings, active, sentences }) => {
               <StatCard label="WPM" value={wpm} />
               <StatCard label="총 입력" value={`${correct} hit / ${mistakes} miss`} />
             </div>
-            <div className="flex" style={{ marginTop: 12 }}>
+            <div className="flex" style={{ marginTop: 24, justifyContent: 'center' }}>
               <button className="icon-button" onClick={startEntry}>
                 다시 시작
               </button>

@@ -5,6 +5,7 @@ import { applyKeystroke, createMatchState, expectedNextChars, completionRatio } 
 import { generateRomaji } from '../utils/romajiGenerate';
 import StatCard from './StatCard';
 import KeyboardOverlay from './KeyboardOverlay';
+import EffectsLayer from './EffectsLayer';
 import { useAudio } from '../hooks/useAudio';
 
 interface Props {
@@ -34,6 +35,7 @@ const romajiOf = (entry: WordEntry) => entry.romaji_primary || generateRomaji(en
 const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
   const level = useMemo(() => WORD_LEVELS[Math.floor(Math.random() * WORD_LEVELS.length)], []);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const mobileInputRef = useRef<HTMLInputElement>(null);
 
   const [items, setItems] = useState<WordFallingItem[]>([]);
   const [matchStates, setMatchStates] = useState<Record<string, MatchState>>({});
@@ -48,8 +50,12 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
   const [missedWords, setMissedWords] = useState(0);
   const [resultOpen, setResultOpen] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
+  const [mobileInput, setMobileInput] = useState('');
   const [speedFactor, setSpeedFactor] = useLocalStorage<number>('jp-word-speed', 1);
   const [spawned, setSpawned] = useState(0);
+
+  // Effects state
+  const [effectTrigger, setEffectTrigger] = useState(0);
 
   const { playOk, playCombo, playError, playLevel } = useAudio({
     enabled: settings.soundEnabled,
@@ -80,6 +86,7 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
     lastSpawnRef.current = 0;
     setPlaying(false);
     setHasStarted(false);
+    setEffectTrigger(0);
   };
 
   const finishGame = () => {
@@ -182,59 +189,76 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
     };
   }, [playing, active, level.spawnInterval, level.maxWords, items.length, spawned, speedFactor]);
 
+  const processKeyPress = (key: string) => {
+    if (!playing) return;
+    const normalized = key.toLowerCase();
+    if (!/^[a-z']$/.test(normalized) && normalized !== 'backspace') return;
+
+    const sorted = [...items].sort((a, b) => b.y - a.y);
+    const candidateIds = targetId ? [targetId, ...sorted.map((i) => i.id)] : sorted.map((i) => i.id);
+
+    for (const id of candidateIds) {
+      const itemState = matchStates[id];
+      if (!itemState) continue;
+      const result = applyKeystroke(itemState, normalized, settings);
+      if (result.status === 'error') {
+        continue;
+      }
+      setMatchStates((prev) => ({ ...prev, [id]: result.state }));
+      setTargetId(id);
+
+      if (result.advanced) {
+        setCorrect((c) => c + 1);
+        setEffectTrigger(t => t + 1); // Trigger particle
+      }
+
+      if (result.status === 'completed') {
+        setItems((prev) => prev.filter((i) => i.id !== id));
+        setMatchStates((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setScore((s) => s + level.baseScore + Math.floor(result.state.reading.length * level.lengthBias) + combo * 2);
+        setCombo((c) => {
+          const next = c + 1;
+          setMaxCombo((m) => Math.max(m, next));
+          if (next % 5 === 0) playCombo();
+          else playOk();
+          return next;
+        });
+      } else {
+        playOk();
+      }
+      return;
+    }
+
+    setMistakes((m) => m + 1);
+    setCombo(0);
+    playError();
+  };
+
   useEffect(() => {
     if (!active) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (!playing) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Allow backspace to work normally if not focusing input (e.g. desktop)
+      // but mobile input handles its own backspace via onChange
       const key = e.key.toLowerCase();
       if (!/^[a-z']$/.test(key) && key !== 'backspace') return;
-      e.preventDefault();
 
-      const sorted = [...items].sort((a, b) => b.y - a.y);
-      const candidateIds = targetId ? [targetId, ...sorted.map((i) => i.id)] : sorted.map((i) => i.id);
-
-      for (const id of candidateIds) {
-        const itemState = matchStates[id];
-        if (!itemState) continue;
-        const result = applyKeystroke(itemState, key, settings);
-        if (result.status === 'error') {
-          continue;
-        }
-        setMatchStates((prev) => ({ ...prev, [id]: result.state }));
-        setTargetId(id);
-
-        if (result.advanced) setCorrect((c) => c + 1);
-
-        if (result.status === 'completed') {
-          setItems((prev) => prev.filter((i) => i.id !== id));
-          setMatchStates((prev) => {
-            const next = { ...prev };
-            delete next[id];
-            return next;
-          });
-          setScore((s) => s + level.baseScore + Math.floor(result.state.reading.length * level.lengthBias) + combo * 2);
-          setCombo((c) => {
-            const next = c + 1;
-            setMaxCombo((m) => Math.max(m, next));
-            if (next % 5 === 0) playCombo();
-            else playOk();
-            return next;
-          });
-        } else {
-          playOk();
-        }
+      // If mobile input is focused, we let the onChange handle it to avoid double input
+      if (document.activeElement === mobileInputRef.current && key !== 'backspace') {
         return;
       }
 
-      setMistakes((m) => m + 1);
-      setCombo(0);
-      playError();
+      e.preventDefault();
+      processKeyPress(key);
     };
 
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [active, playing, items, matchStates, targetId, settings, level.baseScore, level.lengthBias, combo, playOk, playCombo, playError]);
+  }, [active, processKeyPress]);
 
   useEffect(() => {
     if (!active) return;
@@ -246,6 +270,33 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
   const currentMatch = targetId ? matchStates[targetId] : null;
   const expected = currentMatch ? expectedNextChars(currentMatch, settings) : [];
   const progress = currentMatch ? Math.round(completionRatio(currentMatch) * 100) : 0;
+
+  // Always keep focus on mobile input when playing
+  useEffect(() => {
+    if (active && mobileInputRef.current && playing) {
+      mobileInputRef.current.focus();
+    }
+  }, [active, playing]);
+
+  const handleMobileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    const lastChar = val.slice(-1);
+
+    // Simplistic approach: just take the last character typed if length increased
+    // If length decreased, it's a backspace
+    if (val.length < mobileInput.length) {
+      processKeyPress('backspace');
+    } else if (val.length > mobileInput.length) {
+      processKeyPress(lastChar);
+    }
+
+    // Keep only last 10 chars to prevent overflow/lag, but keep enough for backspacing context if needed
+    if (val.length > 20) {
+      setMobileInput(val.slice(-10));
+    } else {
+      setMobileInput(val);
+    }
+  };
 
   return (
     <div className="card">
@@ -278,11 +329,11 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
         <div className="flex" style={{ alignItems: 'center', gap: 6 }}>
           <span className="hint" style={{ minWidth: 40 }}>속도</span>
           <button className="icon-button ghost" onClick={() => setSpeedFactor((v) => Math.max(0.1, +(v - 0.1).toFixed(2)))}>
-            느리게
+            -
           </button>
           <div className="badge">{speedFactor.toFixed(1)}x</div>
           <button className="icon-button ghost" onClick={() => setSpeedFactor((v) => Math.min(1.6, +(v + 0.1).toFixed(2)))}>
-            빠르게
+            +
           </button>
           <div className="hint" style={{ marginLeft: 8 }}>
             총 {TARGET_WORDS}개 / 남은 {Math.max(0, TARGET_WORDS - spawned)}
@@ -290,7 +341,13 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
         </div>
       </div>
 
-      <div ref={surfaceRef} className="game-surface" tabIndex={0}>
+      <div
+        ref={surfaceRef}
+        className={`game-surface ${combo > 20 ? 'fever-mode' : ''}`}
+        onClick={() => mobileInputRef.current?.focus()}
+      >
+        <EffectsLayer active={playing} spawnTrigger={effectTrigger} fever={combo > 20} />
+
         <div className="timer-bar">
           <span style={{ width: `${(timeLeft / GAME_DURATION) * 100}%` }} />
         </div>
@@ -306,8 +363,14 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
             >
               <div className="word-display">{item.entry.display}</div>
               <div className="word-reading">{item.entry.reading}</div>
-              <div className="hint">입력: {typed}</div>
-              <div className="hint">가이드: {romaji}</div>
+              <div className="hint">
+                <span className="match-highlight">
+                  {(match?.buffer || '').toUpperCase()}
+                </span>
+                <span style={{ opacity: 0.5 }}>
+                  {romaji.slice((match?.buffer || '').length)}
+                </span>
+              </div>
               <div className="word-ko">{item.entry.ko}</div>
               <div className="progress">
                 <span style={{ width: `${Math.round(completionRatio(match ?? createMatchState(item.entry.reading)) * 100)}%` }} />
@@ -327,17 +390,30 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
                 <StatCard label="입력" value={`${correct} hit / ${mistakes} miss`} />
                 <StatCard label="놓친 단어" value={missedWords} />
               </div>
-              <div className="flex" style={{ marginTop: 12 }}>
+              <div className="flex" style={{ marginTop: 24, justifyContent: 'center' }}>
                 <button className="icon-button" onClick={resetGame}>
                   다시 시작
                 </button>
                 <button className="icon-button ghost" onClick={() => setResultOpen(false)}>
-                  닫기
+                  완료
                 </button>
               </div>
             </div>
           </div>
         )}
+
+        {/* Hidden Mobile Input that covers the area */}
+        <input
+          ref={mobileInputRef}
+          type="text"
+          className="mobile-input"
+          value={mobileInput}
+          onChange={handleMobileInput}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+        />
       </div>
 
       <div className="input-area">
@@ -345,10 +421,9 @@ const WordRainGame: React.FC<Props> = ({ settings, active, words }) => {
         <div className="hint" style={{ minWidth: 120 }}>
           {targetId
             ? items.find((w) => w.id === targetId)?.entry.display
-            : '입력하면 가장 아래 단어부터 자동 선택'}
+            : '...'}
         </div>
-        <div className="hint">진행률 {progress}%</div>
-        <div className="input-ghost" role="presentation">
+        <div className="input-ghost" role="presentation" onClick={() => mobileInputRef.current?.focus()}>
           {(currentMatch?.buffer || currentMatch?.lastRomaji || '').toUpperCase() || ' '}
           <span className="caret" />
         </div>
